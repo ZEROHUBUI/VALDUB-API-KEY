@@ -1,177 +1,320 @@
 (function () {
-  "use strict";
+  'use strict';
 
-  var ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1";
-  var KEY_NAME = "valdub.apiKey";
-  var MODE_NAME = "valdub.rememberKey";
-  var TIMEOUT_MS = 15000;
+  const STORAGE_KEY = 'valdub_gemini_api_key';
+  const SESSION_VERIFIED = 'valdub_api_key_verified';
+  const GEMINI_MODELS_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 
-  var MSG = {
-    empty: "Лутфан API Key-ро ворид кунед.",
-    busy: "Санҷида истодаем...",
-    ok: "API Key дуруст аст ✓",
-    invalid: "API Key нодуруст аст ё дастрасӣ надорад.",
-    network: "Пайвастшавӣ ба интернет вуҷуд надорад.",
-    rate: "Лимити истифодаи API расидааст. Баъдтар дубора кӯшиш кунед.",
-    server: "Сервер ҷавоб надод. Баъдтар дубора кӯшиш кунед.",
-    unknown: "Ҳангоми санҷиш хатогӣ ба вуҷуд омад.",
-    cont: "Калид тасдиқ шуд. Шумо ба экрани навбатӣ мегузаред.",
-    sessionHint: "Калид танҳо то пӯшидани ин варақа дар sessionStorage-и браузер мемонад.",
-    localHint: "Калид дар localStorage-и ин браузер нигоҳ дошта мешавад ва пас аз пӯшидани браузер низ мемонад. Онро метавонед бо тугмаи тоза кардан нест кунед."
-  };
+  const apiKeyInput = document.getElementById('apiKeyInput');
+  const toggleVisibility = document.getElementById('toggleVisibility');
+  const clearBtn = document.getElementById('clearBtn');
+  const validateBtn = document.getElementById('validateBtn');
+  const continueBtn = document.getElementById('continueBtn');
+  const saveKeyCheckbox = document.getElementById('saveKeyCheckbox');
+  const removeSavedBtn = document.getElementById('removeSavedBtn');
+  const statusMessage = document.getElementById('statusMessage');
+  const toastContainer = document.getElementById('toastContainer');
 
-  var $ = function (id) { return document.getElementById(id); };
-  var input = $("key"), wrap = $("inputWrap"), eyeBtn = $("eyeBtn"), clearBtn = $("clearBtn");
-  var verifyBtn = $("verifyBtn"), continueBtn = $("continueBtn"), statusEl = $("status");
-  var remember = $("remember"), hint = $("storeHint");
+  const eyeOpen = toggleVisibility.querySelector('.eye-open');
+  const eyeClosed = toggleVisibility.querySelector('.eye-closed');
+  const btnText = validateBtn.querySelector('.btn-text');
+  const btnSpinner = validateBtn.querySelector('.btn-spinner');
 
-  var verifying = false, validated = false, controller = null;
+  let isValidating = false;
+  let isVerified = false;
+  let currentKey = '';
 
-  /* ---------- Storage ---------- */
-  function safe(fn) { try { return fn(); } catch (e) { return null; } }
-  function readSaved() {
-    return safe(function () { return sessionStorage.getItem(KEY_NAME); }) ||
-           safe(function () { return localStorage.getItem(KEY_NAME); }) || "";
+  function setStatus(text, type) {
+    statusMessage.textContent = text;
+    statusMessage.className = 'status-message';
+    if (type) {
+      statusMessage.classList.add(type);
+    }
   }
-  function clearSaved() {
-    safe(function () { sessionStorage.removeItem(KEY_NAME); });
-    safe(function () { localStorage.removeItem(KEY_NAME); });
-  }
-  function saveKey(key) {
-    clearSaved();
-    if (remember.checked) safe(function () { localStorage.setItem(KEY_NAME, key); });
-    else safe(function () { sessionStorage.setItem(KEY_NAME, key); });
-  }
-  function updateHint() { hint.textContent = remember.checked ? MSG.localHint : MSG.sessionHint; }
 
-  /* ---------- UI state ---------- */
-  function setStatus(text, kind) {
-    statusEl.textContent = text || "";
-    statusEl.className = "status" + (kind ? " " + kind : "");
-    wrap.classList.remove("ok", "bad");
-    if (kind === "ok") wrap.classList.add("ok");
-    if (kind === "err") { void wrap.offsetWidth; wrap.classList.add("bad"); }
+  function setInputState(state) {
+    apiKeyInput.classList.remove('valid', 'invalid');
+    if (state) {
+      apiKeyInput.classList.add(state);
+    }
   }
-  function setValidated(v) {
-    validated = v;
-    continueBtn.disabled = !v;
-    continueBtn.classList.toggle("ready", v);
-  }
-  function setLoading(v) {
-    verifying = v;
-    verifyBtn.disabled = v;
-    verifyBtn.classList.toggle("loading", v);
-    verifyBtn.setAttribute("aria-busy", v ? "true" : "false");
-  }
-  function syncClear() { clearBtn.hidden = input.value.length === 0; }
 
-  /* ---------- Real validation via Gemini API ---------- */
-  async function verify() {
-    if (verifying) return;
-    var key = input.value.trim();
-    setValidated(false);
-    if (!key) { setStatus(MSG.empty, "err"); input.focus(); return; }
+  function showToast(message, type) {
+    const toast = document.createElement('div');
+    toast.className = 'toast' + (type ? ' ' + type : '');
+    toast.textContent = message;
+    toastContainer.appendChild(toast);
+    setTimeout(function () {
+      toast.style.opacity = '0';
+      toast.style.transition = 'opacity 0.25s';
+      setTimeout(function () {
+        if (toast.parentNode) {
+          toast.parentNode.removeChild(toast);
+        }
+      }, 260);
+    }, 3200);
+  }
 
-    setLoading(true);
-    setStatus(MSG.busy, "busy");
-    controller = new AbortController();
-    var timer = setTimeout(function () { controller.abort(); }, TIMEOUT_MS);
+  function setValidating(loading) {
+    isValidating = loading;
+    validateBtn.disabled = loading;
+    apiKeyInput.disabled = loading;
+    toggleVisibility.disabled = loading;
+    clearBtn.disabled = loading;
+
+    if (loading) {
+      btnText.textContent = 'Санҷида истодаем...';
+      btnSpinner.classList.remove('hidden');
+      setStatus('Санҷида истодаем...', 'loading');
+      setInputState(null);
+    } else {
+      btnSpinner.classList.add('hidden');
+    }
+  }
+
+  function setVerified(success) {
+    isVerified = success;
+    continueBtn.disabled = !success;
+
+    if (success) {
+      btnText.textContent = 'API Key тасдиқ шуд ✓';
+      validateBtn.classList.add('success-state');
+      setStatus('API Key дуруст аст ✓', 'success');
+      setInputState('valid');
+      try {
+        sessionStorage.setItem(SESSION_VERIFIED, '1');
+        sessionStorage.setItem('valdub_temp_key', currentKey);
+      } catch (e) {}
+    } else {
+      btnText.textContent = 'Санҷиши API Key';
+      validateBtn.classList.remove('success-state');
+      continueBtn.disabled = true;
+      try {
+        sessionStorage.removeItem(SESSION_VERIFIED);
+        sessionStorage.removeItem('valdub_temp_key');
+      } catch (e) {}
+    }
+  }
+
+  function mapErrorToMessage(status, errorText) {
+    if (status === 0 || status === 'network') {
+      return 'Пайвастшавӣ ба интернет дастрас нест.';
+    }
+    if (status === 400 || status === 401 || status === 403) {
+      return 'API Key нодуруст аст ё дастрасӣ надорад.';
+    }
+    if (status === 429) {
+      return 'Лимити API истифода шудааст. Баъдтар дубора кӯшиш кунед.';
+    }
+    if (status >= 500) {
+      return 'Сервер ҷавоб надод. Баъдтар дубора кӯшиш кунед.';
+    }
+    if (errorText && /cors|failed to fetch|networkerror/i.test(errorText)) {
+      return 'Пайвастшавӣ ба интернет дастрас нест.';
+    }
+    return 'Ҳангоми санҷиш хатогӣ ба вуҷуд омад.';
+  }
+
+  async function validateApiKey(key) {
+    const url = GEMINI_MODELS_URL + '?key=' + encodeURIComponent(key);
 
     try {
-      var res = await fetch(ENDPOINT, {
-        method: "GET",
-        headers: { "x-goog-api-key": key },
+      const controller = new AbortController();
+      const timeoutId = setTimeout(function () {
+        controller.abort();
+      }, 15000);
+
+      const response = await fetch(url, {
+        method: 'GET',
         signal: controller.signal,
-        cache: "no-store"
+        headers: {
+          'Accept': 'application/json'
+        }
       });
-      if (res.ok) {
-        saveKey(key);
-        setValidated(true);
-        setStatus(MSG.ok, "ok");
-      } else if (res.status === 429) {
-        setStatus(MSG.rate, "warn");
-      } else if (res.status >= 500) {
-        setStatus(MSG.server, "err");
-      } else if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 404) {
-        setStatus(MSG.invalid, "err");
-      } else {
-        setStatus(MSG.unknown, "err");
+
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data && (data.models || Array.isArray(data))) {
+          return { ok: true };
+        }
+        return { ok: false, status: 400, message: 'API Key нодуруст аст ё дастрасӣ надорад.' };
       }
-    } catch (e) {
-      if (e && e.name === "AbortError") setStatus(MSG.server, "err");
-      else if (e instanceof TypeError) setStatus(MSG.network, "err");
-      else setStatus(MSG.unknown, "err");
-    } finally {
-      clearTimeout(timer);
-      controller = null;
-      setLoading(false);
+
+      let errBody = '';
+      try {
+        const errJson = await response.json();
+        if (errJson && errJson.error && errJson.error.message) {
+          errBody = errJson.error.message;
+        }
+      } catch (e) {}
+
+      return {
+        ok: false,
+        status: response.status,
+        message: mapErrorToMessage(response.status, errBody)
+      };
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        return { ok: false, status: 0, message: 'Сервер ҷавоб надод. Баъдтар дубора кӯшиш кунед.' };
+      }
+      return {
+        ok: false,
+        status: 'network',
+        message: mapErrorToMessage('network', err.message || String(err))
+      };
     }
   }
 
-  /* ---------- Navigation architecture ---------- */
-  var Nav = {
-    current: "api-key",
-    go: function (to, payload) {
-      var from = this.current;
-      this.current = to;
-      try { history.pushState({ screen: to }, "", "#/" + to); } catch (e) { location.hash = "#/" + to; }
-      document.dispatchEvent(new CustomEvent("valdub:navigate", { detail: { from: from, to: to, payload: payload || null } }));
+  async function handleValidate() {
+    if (isValidating) return;
+
+    const key = apiKeyInput.value.trim();
+    currentKey = key;
+
+    if (!key) {
+      setStatus('Лутфан API Key-ро ворид кунед.', 'error');
+      setInputState('invalid');
+      setVerified(false);
+      return;
     }
-  };
-  window.VALDUB = window.VALDUB || {};
-  window.VALDUB.navigate = function (to, payload) { Nav.go(to, payload); };
-  window.VALDUB.getApiKey = function () { return validated ? input.value.trim() : ""; };
 
-  window.addEventListener("popstate", function () {
-    Nav.current = location.hash.replace("#/", "") || "api-key";
-  });
+    if (key.length < 20) {
+      setStatus('API Key нодуруст аст ё дастрасӣ надорад.', 'error');
+      setInputState('invalid');
+      setVerified(false);
+      return;
+    }
 
-  /* ---------- Events ---------- */
-  eyeBtn.addEventListener("click", function () {
-    var show = input.type === "password";
-    input.type = show ? "text" : "password";
-    eyeBtn.setAttribute("aria-pressed", show ? "true" : "false");
-    eyeBtn.setAttribute("aria-label", show ? "Пинҳон кардани калид" : "Нишон додани калид");
-    eyeBtn.title = show ? "Пинҳон кардан" : "Нишон додан";
-    input.focus();
-  });
+    setValidating(true);
+    setVerified(false);
 
-  clearBtn.addEventListener("click", function () {
-    if (verifying && controller) controller.abort();
-    input.value = "";
-    clearSaved();
-    setValidated(false);
-    setStatus("");
-    syncClear();
-    input.focus();
-  });
+    const result = await validateApiKey(key);
 
-  input.addEventListener("input", function () {
-    syncClear();
-    if (validated) { setValidated(false); }
-    if (!verifying) setStatus("");
-  });
-  input.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); verify(); } });
+    setValidating(false);
 
-  remember.addEventListener("change", function () {
-    updateHint();
-    if (validated) saveKey(input.value.trim());
-    safe(function () { localStorage.setItem(MODE_NAME, remember.checked ? "1" : "0"); });
-  });
+    if (result.ok) {
+      setVerified(true);
+      if (saveKeyCheckbox.checked) {
+        try {
+          localStorage.setItem(STORAGE_KEY, key);
+        } catch (e) {}
+      } else {
+        try {
+          localStorage.removeItem(STORAGE_KEY);
+        } catch (e) {}
+      }
+      showToast('API Key бо муваффақият тасдиқ шуд', 'success');
+    } else {
+      setVerified(false);
+      setStatus(result.message, 'error');
+      setInputState('invalid');
+      btnText.textContent = 'Санҷиши API Key';
+      showToast(result.message, 'error');
+    }
+  }
 
-  verifyBtn.addEventListener("click", verify);
+  function handleToggleVisibility() {
+    const isPassword = apiKeyInput.type === 'password';
+    apiKeyInput.type = isPassword ? 'text' : 'password';
+    eyeOpen.classList.toggle('hidden', !isPassword);
+    eyeClosed.classList.toggle('hidden', isPassword);
+    toggleVisibility.setAttribute(
+      'aria-label',
+      isPassword ? 'Пинҳон кардани API Key' : 'Нишон додани API Key'
+    );
+  }
 
-  continueBtn.addEventListener("click", function () {
-    if (!validated) return;
-    setStatus(MSG.cont, "ok");
-    Nav.go("home", { apiKeyReady: true });
-  });
+  function handleClear() {
+    apiKeyInput.value = '';
+    currentKey = '';
+    setStatus('Лутфан API Key-ро ворид кунед.');
+    setInputState(null);
+    setVerified(false);
+    btnText.textContent = 'Санҷиши API Key';
+    validateBtn.classList.remove('success-state');
+    apiKeyInput.focus();
+  }
 
-  /* ---------- Init ---------- */
-  remember.checked = safe(function () { return localStorage.getItem(MODE_NAME); }) === "1" &&
-                     !!safe(function () { return localStorage.getItem(KEY_NAME); });
-  updateHint();
-  var saved = readSaved();
-  if (saved) { input.value = saved; }
-  syncClear();
+  function handleRemoveSaved() {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch (e) {}
+    apiKeyInput.value = '';
+    currentKey = '';
+    saveKeyCheckbox.checked = false;
+    setStatus('Лутфан API Key-ро ворид кунед.');
+    setInputState(null);
+    setVerified(false);
+    btnText.textContent = 'Санҷиши API Key';
+    validateBtn.classList.remove('success-state');
+    showToast('Калиди захирашуда тоза карда шуд', 'success');
+  }
+
+  function handleContinue() {
+    if (!isVerified || !currentKey) return;
+    try {
+      sessionStorage.setItem(SESSION_VERIFIED, '1');
+      sessionStorage.setItem('valdub_temp_key', currentKey);
+    } catch (e) {}
+    showToast('API Key тасдиқ шуд. Марҳилаи навбатӣ ба зудӣ...', 'success');
+  }
+
+  function loadSavedKey() {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        apiKeyInput.value = saved;
+        saveKeyCheckbox.checked = true;
+        currentKey = saved;
+        setStatus('Калиди захирашуда бор карда шуд. Санҷишро анҷом диҳед.');
+      }
+    } catch (e) {}
+  }
+
+  function init() {
+    loadSavedKey();
+
+    toggleVisibility.addEventListener('click', handleToggleVisibility);
+    clearBtn.addEventListener('click', handleClear);
+    validateBtn.addEventListener('click', handleValidate);
+    continueBtn.addEventListener('click', handleContinue);
+    removeSavedBtn.addEventListener('click', handleRemoveSaved);
+
+    apiKeyInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleValidate();
+      }
+    });
+
+    apiKeyInput.addEventListener('input', function () {
+      if (isVerified) {
+        setVerified(false);
+        btnText.textContent = 'Санҷиши API Key';
+        validateBtn.classList.remove('success-state');
+        setStatus('Лутфан API Key-ро ворид кунед.');
+        setInputState(null);
+      }
+    });
+
+    saveKeyCheckbox.addEventListener('change', function () {
+      if (!saveKeyCheckbox.checked) {
+        try {
+          localStorage.removeItem(STORAGE_KEY);
+        } catch (e) {}
+      } else if (isVerified && currentKey) {
+        try {
+          localStorage.setItem(STORAGE_KEY, currentKey);
+        } catch (e) {}
+      }
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
 })();
